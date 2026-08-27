@@ -6,15 +6,17 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from typing import List
 
 # ============================================================
 # BLUE TEAM API
 # ============================================================
 
 app = FastAPI(
-    title="SentinelPay Blue Team API",
-    description="SentinelPay AI fraud detection and adaptive defense API",
+    title="Blue Team API",
+    description="AI fraud detection and adaptive defense API",
     version="2.0"
 )
 
@@ -42,6 +44,9 @@ FEATURE_FILE = "models/feature_columns.pkl"
 HISTORY_FILE = "features.csv"
 LOG_FILE = "blue_team_api_log.csv"
 
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # ============================================================
 # LOAD MODEL
@@ -529,100 +534,93 @@ def analyze_transaction(txn: Transaction):
 
     global history
 
+    try:
 
-    # --------------------------------------------------------
-    # FEATURE ENGINEERING
-    # --------------------------------------------------------
+        # Create features
+        features = create_features(txn)
 
-    features = create_features(txn)
+        # Graph analysis
+        graph_score = get_graph_score(txn)
 
+        # Run Blue Team
+        result = run_blue_team(
+            features,
+            graph_score
+        )
 
-    # --------------------------------------------------------
-    # GRAPH SCORE
-    # --------------------------------------------------------
+        # Complete response
+        response = {
+            "status": "SUCCESS",
 
-    graph_score = get_graph_score(txn)
+            "transaction": {
+                "transaction_id": txn.transaction_id,
+                "user_id": txn.user_id,
+                "timestamp": txn.timestamp,
+                "amount": txn.amount,
+                "device_id": txn.device_id,
+                "merchant_id": txn.merchant_id,
+                "location": txn.location
+            },
 
+            "features": {
+                "hour": features["hour"],
+                "is_odd_hour": features["is_odd_hour"],
+                "is_new_device": features["is_new_device"],
+                "is_new_merchant": features["is_new_merchant"],
+                "amount_zscore": round(features["amount_zscore"], 2),
+                "amount_vs_user_avg": round(
+                    features["amount_vs_user_avg"], 2
+                ),
+                "seconds_since_last_txn": round(
+                    features["seconds_since_last_txn"], 2
+                ),
+                "txns_last_1h": features["txns_last_1h"],
+                "device_shared_users":
+                    features["device_shared_users"]
+            },
 
-    # --------------------------------------------------------
-    # BLUE TEAM DECISION
-    # --------------------------------------------------------
+            "risk_analysis": result
+        }
 
-    result = run_blue_team(
-        features,
-        graph_score
-    )
+        # Save transaction to live history
+        new_row = {
+            "transaction_id": txn.transaction_id,
+            "user_id": txn.user_id,
+            "timestamp": txn.timestamp,
+            "amount": txn.amount,
+            "device_id": txn.device_id,
+            "merchant_id": txn.merchant_id,
+            "location": txn.location,
+            **features
+        }
 
+        history = pd.concat(
+            [
+                history,
+                pd.DataFrame([new_row])
+            ],
+            ignore_index=True
+        )
 
-    result = {
+        # Save log
+        save_log(
+            new_row,
+            {
+                "transaction_id": txn.transaction_id,
+                "user_id": txn.user_id,
+                "amount": txn.amount,
+                **result
+            }
+        )
 
-        "transaction_id":
-            txn.transaction_id,
+        return response
 
-        "user_id":
-            txn.user_id,
+    except Exception as e:
 
-        "amount":
-            txn.amount,
-
-        **result
-
-    }
-
-
-    # --------------------------------------------------------
-    # LIVE HISTORY
-    # --------------------------------------------------------
-
-    new_row = {
-
-        "transaction_id":
-            txn.transaction_id,
-
-        "user_id":
-            txn.user_id,
-
-        "timestamp":
-            txn.timestamp,
-
-        "amount":
-            txn.amount,
-
-        "device_id":
-            txn.device_id,
-
-        "merchant_id":
-            txn.merchant_id,
-
-        "location":
-            txn.location,
-
-        **features
-
-    }
-
-
-    history = pd.concat(
-        [
-            history,
-            pd.DataFrame([new_row])
-        ],
-        ignore_index=True
-    )
-
-
-    # --------------------------------------------------------
-    # SAVE LOG
-    # --------------------------------------------------------
-
-    save_log(
-        new_row,
-        result
-    )
-
-
-    return result
-
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 # ============================================================
 # RED TEAM ADAPTIVE FEATURE API
@@ -925,3 +923,37 @@ def home():
 # ============================================================
 
 # uvicorn blue_team_api:app --reload
+
+@app.post("/transactions/batch")
+def analyze_transaction_batch(
+    transactions: List[Transaction]
+):
+
+    results = []
+
+    for txn in transactions:
+
+        result = analyze_transaction(txn)
+
+        results.append(result)
+
+    return {
+        "status": "SUCCESS",
+        "total_transactions": len(results),
+        "results": results
+    }
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+
+app.mount(
+    "/static",
+    StaticFiles(directory=STATIC_DIR),
+    name="static"
+)
+
+@app.get("/dashboard")
+def dashboard():
+    return FileResponse(
+        os.path.join(STATIC_DIR, "index.html")
+    )
