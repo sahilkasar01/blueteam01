@@ -1,0 +1,12 @@
+feature,importance
+is_new_device,0.5215132
+amount,0.34523502
+rule_score,0.09322955
+is_new_merchant,0.014883514
+amount_zscore,0.009134086
+seconds_since_last_txn,0.00824455
+device_shared_users,0.0029682883
+amount_vs_user_avg,0.0028042374
+hour,0.0019874403
+is_odd_hour,0.0
+txns_last_1h,0.0
