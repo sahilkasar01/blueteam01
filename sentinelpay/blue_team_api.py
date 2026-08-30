@@ -17,7 +17,7 @@ from typing import List
 app = FastAPI(
     title="Blue Team API",
     description="AI fraud detection and adaptive defense API",
-    version="2.0"
+    version="2.1"
 )
 
 
@@ -313,6 +313,33 @@ def create_features(txn):
         rule_score += 25
 
 
+    # --------------------------------------------------------
+    # ABSOLUTE AMOUNT SAFETY NET
+    # Every check above is RELATIVE (to this user's own average,
+    # or the global average when the user is brand new). A
+    # relative check is blind by construction whenever there's
+    # no trustworthy baseline yet - a new user's first ever
+    # transaction always looks "average" to amount_vs_user_avg
+    # because it IS the average of a 1-sample history. Add a
+    # hard ceiling that doesn't depend on any baseline at all,
+    # plus extra suspicion specifically for a large FIRST-TIME
+    # amount from a user/device with no transaction history.
+    # Tune these two numbers to your real transaction scale.
+    # --------------------------------------------------------
+
+    ABSOLUTE_EXTREME_AMOUNT = 1_000_000
+    ABSOLUTE_HIGH_AMOUNT = 100_000
+
+    if amount >= ABSOLUTE_EXTREME_AMOUNT:
+        rule_score += 50
+
+    elif amount >= ABSOLUTE_HIGH_AMOUNT:
+        rule_score += 30
+
+    if len(user_history) == 0 and amount >= ABSOLUTE_HIGH_AMOUNT:
+        rule_score += 25
+
+
     rule_score = min(
         rule_score,
         100
@@ -459,12 +486,30 @@ def calculate_final_risk(
 # DECISION
 # ============================================================
 
-def make_decision(final_score):
+def make_decision(
+    final_score,
+    rule_score=0,
+    anomaly_score=0,
+    graph_score=0
+):
 
-    if final_score >= 70:
+    # --------------------------------------------------------
+    # ESCALATION OVERRIDE
+    # A weighted AVERAGE can dilute one layer being very
+    # confident - e.g. rule_score=95 (extreme absolute amount +
+    # new device + new merchant) still only contributes 0.25*95
+    # = 23.75 to final_score, nowhere near the BLOCK threshold,
+    # if ml_score stays near 0 because the amount is outside
+    # anything the model was trained on. Let any single layer
+    # crossing its own high-confidence bar escalate the decision
+    # directly, regardless of what the blended average says.
+    # Thresholds below are a starting point - tune to your data.
+    # --------------------------------------------------------
+
+    if final_score >= 70 or rule_score >= 55 or graph_score >= 60:
         return "BLOCK"
 
-    elif final_score >= 40:
+    elif final_score >= 40 or rule_score >= 30 or anomaly_score >= 40:
         return "HOLD"
 
     return "ALLOW"
@@ -490,7 +535,10 @@ def run_blue_team(features, graph_score=0):
     )
 
     decision = make_decision(
-        final_score
+        final_score,
+        rule_score,
+        anomaly_score,
+        graph_score
     )
 
     return {
@@ -594,13 +642,30 @@ def analyze_transaction(txn: Transaction):
             **features
         }
 
-        history = pd.concat(
-            [
-                history,
-                pd.DataFrame([new_row])
-            ],
-            ignore_index=True
-        )
+        # --------------------------------------------------------
+        # SELF-POISONING FIX
+        # Previously this appended EVERY transaction to `history`
+        # unconditionally - including ones just flagged BLOCK or
+        # HOLD. That means resubmitting the same suspicious
+        # transaction taught the model to treat it as that user's
+        # normal baseline (amount_vs_user_avg -> ~1, is_new_device
+        # -> 0) on the very next attempt. Only let transactions the
+        # system itself judged ALLOW become part of the learned
+        # baseline. BLOCK/HOLD transactions still show up in the
+        # dashboard/log below for analyst review, they just don't
+        # silently redefine what's "normal" until a human confirms
+        # them (see the Adaptive Defense loop for that path).
+        # --------------------------------------------------------
+
+        if result["decision"] == "ALLOW":
+
+            history = pd.concat(
+                [
+                    history,
+                    pd.DataFrame([new_row])
+                ],
+                ignore_index=True
+            )
 
         # Save log
         save_log(
@@ -911,7 +976,7 @@ def home():
             "BLUE TEAM",
 
         "version":
-            "2.0",
+            "2.1",
 
         "message":
             "SentinelPay Blue Team API is running"
